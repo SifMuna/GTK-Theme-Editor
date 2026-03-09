@@ -441,7 +441,15 @@ class ThemeEditorWindow(Gtk.Window):
         # Track which preview widgets exist, keyed by CSS class name
         self.preview_widgets = {}
 
+        # Undo stack: list of (source_dict_name, key, old_value, widget_ref_or_None)
+        self.undo_stack = []
+        # Dirty flag: True when unsaved changes exist
+        self.dirty = False
+        # Guard against re-entrant callbacks during undo
+        self._undoing = False
+
         self._build_ui()
+        self.connect('delete-event', self._on_delete_event)
 
     # ── Layout ────────────────────────────────────────────────
 
@@ -465,6 +473,14 @@ class ThemeEditorWindow(Gtk.Window):
         save_as_btn = Gtk.Button(label="Save As...")
         save_as_btn.connect('clicked', self._on_save_as)
         toolbar.pack_start(save_as_btn, False, False, 0)
+
+        sep = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
+        toolbar.pack_start(sep, False, False, 4)
+
+        self.undo_btn = Gtk.Button(label="Undo")
+        self.undo_btn.set_sensitive(False)
+        self.undo_btn.connect('clicked', self._on_undo)
+        toolbar.pack_start(self.undo_btn, False, False, 0)
 
         self.theme_label = Gtk.Label(label="No theme loaded")
         self.theme_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
@@ -573,6 +589,12 @@ class ThemeEditorWindow(Gtk.Window):
         self._populate_meta_page()
         self._build_preview()
         self._refresh_preview_css()
+
+        # Reset undo/dirty state for fresh theme
+        self.undo_stack.clear()
+        self.undo_btn.set_sensitive(False)
+        self.dirty = False
+        self._update_title()
 
         self.show_all()
 
@@ -977,9 +999,13 @@ class ThemeEditorWindow(Gtk.Window):
             row += 1
 
     def _on_gtk3_color_changed(self, btn):
+        old_value = self.gtk3_colors[btn.key]['value']
         rgba = btn.get_rgba()
         hex_color = '#{:02x}{:02x}{:02x}'.format(
             int(rgba.red * 255), int(rgba.green * 255), int(rgba.blue * 255))
+        if hex_color == old_value:
+            return
+        self._push_undo('gtk3', btn.key, old_value, btn)
         self.gtk3_colors[btn.key]['value'] = hex_color
         btn.hex_label.set_text(hex_color)
         btn.swatch.queue_draw()
@@ -1013,9 +1039,13 @@ class ThemeEditorWindow(Gtk.Window):
             row += 1
 
     def _on_gtk2_color_changed(self, btn):
+        old_value = self.gtk2_colors[btn.key]['value']
         rgba = btn.get_rgba()
         hex_color = '#{:02x}{:02x}{:02x}'.format(
             int(rgba.red * 255), int(rgba.green * 255), int(rgba.blue * 255))
+        if hex_color == old_value:
+            return
+        self._push_undo('gtk2', btn.key, old_value, btn)
         self.gtk2_colors[btn.key]['value'] = hex_color
         btn.hex_label.set_text(hex_color)
         btn.swatch.queue_draw()
@@ -1075,13 +1105,32 @@ class ThemeEditorWindow(Gtk.Window):
             row += 1
 
     def _on_murrine_bool_changed(self, switch, pspec):
-        self.murrine_settings[switch.key]['value'] = 'TRUE' if switch.get_active() else 'FALSE'
+        if self._undoing:
+            return
+        old_value = self.murrine_settings[switch.key]['value']
+        new_value = 'TRUE' if switch.get_active() else 'FALSE'
+        if new_value == old_value:
+            return
+        self._push_undo('murrine', switch.key, old_value, switch)
+        self.murrine_settings[switch.key]['value'] = new_value
 
     def _on_murrine_float_changed(self, scale):
-        self.murrine_settings[scale.key]['value'] = f'{scale.get_value():.2f}'
+        if self._undoing:
+            return
+        old_value = self.murrine_settings[scale.key]['value']
+        new_value = f'{scale.get_value():.2f}'
+        self._push_undo('murrine', scale.key, old_value, scale)
+        self.murrine_settings[scale.key]['value'] = new_value
 
     def _on_murrine_int_changed(self, spin):
-        self.murrine_settings[spin.key]['value'] = str(int(spin.get_value()))
+        if self._undoing:
+            return
+        old_value = self.murrine_settings[spin.key]['value']
+        new_value = str(int(spin.get_value()))
+        if new_value == old_value:
+            return
+        self._push_undo('murrine', spin.key, old_value, spin)
+        self.murrine_settings[spin.key]['value'] = new_value
 
     # ── XFWM4 Page ───────────────────────────────────────────
 
@@ -1130,17 +1179,35 @@ class ThemeEditorWindow(Gtk.Window):
             row += 1
 
     def _on_xfwm4_color_changed(self, btn):
+        old_value = self.xfwm4_settings[btn.key]['value']
         rgba = btn.get_rgba()
         hex_color = '#{:02x}{:02x}{:02x}'.format(
             int(rgba.red * 255), int(rgba.green * 255), int(rgba.blue * 255))
+        if hex_color == old_value:
+            return
+        self._push_undo('xfwm4', btn.key, old_value, btn)
         self.xfwm4_settings[btn.key]['value'] = hex_color
         btn.hex_label.set_text(hex_color)
 
     def _on_xfwm4_bool_changed(self, switch, pspec):
-        self.xfwm4_settings[switch.key]['value'] = 'true' if switch.get_active() else 'false'
+        if self._undoing:
+            return
+        old_value = self.xfwm4_settings[switch.key]['value']
+        new_value = 'true' if switch.get_active() else 'false'
+        if new_value == old_value:
+            return
+        self._push_undo('xfwm4', switch.key, old_value, switch)
+        self.xfwm4_settings[switch.key]['value'] = new_value
 
     def _on_xfwm4_int_changed(self, spin):
-        self.xfwm4_settings[spin.key]['value'] = str(int(spin.get_value()))
+        if self._undoing:
+            return
+        old_value = self.xfwm4_settings[spin.key]['value']
+        new_value = str(int(spin.get_value()))
+        if new_value == old_value:
+            return
+        self._push_undo('xfwm4', spin.key, old_value, spin)
+        self.xfwm4_settings[spin.key]['value'] = new_value
 
     # ── Metadata Page ─────────────────────────────────────────
 
@@ -1174,7 +1241,108 @@ class ThemeEditorWindow(Gtk.Window):
             row += 1
 
     def _on_meta_changed(self, entry):
-        self.index_meta[entry.key]['value'] = entry.get_text()
+        if self._undoing:
+            return
+        old_value = self.index_meta[entry.key]['value']
+        new_value = entry.get_text()
+        if new_value == old_value:
+            return
+        self._push_undo('meta', entry.key, old_value, entry)
+        self.index_meta[entry.key]['value'] = new_value
+
+    # ── Undo System ────────────────────────────────────────────
+
+    def _push_undo(self, source, key, old_value, widget=None):
+        """Record a change for undo. source is 'gtk3', 'gtk2', 'murrine', 'xfwm4', or 'meta'."""
+        self.undo_stack.append((source, key, old_value, widget))
+        self.undo_btn.set_sensitive(True)
+        self.dirty = True
+        self._update_title()
+
+    def _on_undo(self, button):
+        """Pop the most recent change and restore the previous value."""
+        if not self.undo_stack:
+            return
+
+        self._undoing = True
+        source, key, old_value, widget = self.undo_stack.pop()
+
+        # Restore the value in the data model
+        if source == 'gtk3' and key in self.gtk3_colors:
+            self.gtk3_colors[key]['value'] = old_value
+        elif source == 'gtk2' and key in self.gtk2_colors:
+            self.gtk2_colors[key]['value'] = old_value
+        elif source == 'murrine' and key in self.murrine_settings:
+            self.murrine_settings[key]['value'] = old_value
+        elif source == 'xfwm4' and key in self.xfwm4_settings:
+            self.xfwm4_settings[key]['value'] = old_value
+        elif source == 'meta' and key in self.index_meta:
+            self.index_meta[key]['value'] = old_value
+
+        # Update the widget to reflect the restored value
+        if widget is not None:
+            if isinstance(widget, ColorButton):
+                rgba = Gdk.RGBA()
+                rgba.parse(old_value)
+                widget.set_rgba(rgba)
+                if hasattr(widget, 'hex_label'):
+                    widget.hex_label.set_text(old_value)
+                if hasattr(widget, 'swatch'):
+                    widget.swatch.queue_draw()
+            elif isinstance(widget, Gtk.SpinButton):
+                widget.set_value(int(old_value) if '.' not in old_value else float(old_value))
+            elif isinstance(widget, Gtk.Scale):
+                widget.set_value(float(old_value))
+            elif isinstance(widget, Gtk.Switch):
+                widget.set_active(old_value.upper() in ('TRUE', '1', 'YES'))
+            elif isinstance(widget, Gtk.Entry):
+                widget.set_text(old_value)
+
+        # Refresh preview if it was a color change
+        if source in ('gtk3', 'gtk2'):
+            self._refresh_preview_css()
+
+        self._undoing = False
+        self.undo_btn.set_sensitive(len(self.undo_stack) > 0)
+        if not self.undo_stack:
+            self.dirty = False
+            self._update_title()
+
+    def _update_title(self):
+        """Show a dot in the title when there are unsaved changes."""
+        base = "GTK3 Theme Editor"
+        self.set_title(f"{base} *" if self.dirty else base)
+
+    # ── Close Confirmation ─────────────────────────────────────
+
+    def _on_delete_event(self, widget, event):
+        """Intercept window close to check for unsaved changes."""
+        if not self.dirty:
+            return False  # allow close
+
+        dialog = Gtk.MessageDialog(
+            parent=self,
+            flags=Gtk.DialogFlags.MODAL,
+            message_type=Gtk.MessageType.WARNING,
+            text="Do you want to save before closing?",
+        )
+        dialog.format_secondary_text("You have unsaved changes that will be lost if you don't save.")
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Don't Save", Gtk.ResponseType.REJECT)
+        save_btn = dialog.add_button("Save", Gtk.ResponseType.ACCEPT)
+        save_btn.get_style_context().add_class('suggested-action')
+
+        resp = dialog.run()
+        dialog.destroy()
+
+        if resp == Gtk.ResponseType.ACCEPT:
+            if self.theme_dir:
+                self._save_to_dir(self.theme_dir)
+            return False  # saved, allow close
+        elif resp == Gtk.ResponseType.REJECT:
+            return False  # discard, allow close
+        else:
+            return True  # cancel, block close
 
     # ── Save ──────────────────────────────────────────────────
 
@@ -1273,6 +1441,11 @@ class ThemeEditorWindow(Gtk.Window):
             self.xfwm4_text = self._read_file(os.path.join(dest_dir, 'xfwm4', 'themerc'))
             self.index_text = self._read_file(os.path.join(dest_dir, 'index.theme'))
 
+            self.undo_stack.clear()
+            self.undo_btn.set_sensitive(False)
+            self.dirty = False
+            self._update_title()
+
             self._show_message(f"Theme saved to:\n{dest_dir}", Gtk.MessageType.INFO)
         except Exception as e:
             self._show_message(f"Error saving theme:\n{e}", Gtk.MessageType.ERROR)
@@ -1292,6 +1465,7 @@ class ThemeEditorWindow(Gtk.Window):
 
 def main():
     win = ThemeEditorWindow()
+    # delete-event handles the save confirmation; destroy quits the app
     win.connect('destroy', Gtk.main_quit)
     win.show_all()
 
